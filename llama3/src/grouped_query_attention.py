@@ -9,8 +9,8 @@ from src.rope import RoPe
 
 class GroupedQueryAttention(nn.Module):
     def __init__(self, input_size: int, head_dim: int, output_size: int,
-                 rope_encoder: RoPe, num_heads: int = 8, num_kv_heads: int = 4,
-                 is_masked: bool = False) -> None:
+                 rope_encoder: RoPe, max_batch_size: int, max_seq_length: int,
+                 num_heads: int = 8, num_kv_heads: int = 4, is_masked: bool = False) -> None:
         super().__init__()
 
         self.rope_encoder = rope_encoder
@@ -28,20 +28,31 @@ class GroupedQueryAttention(nn.Module):
         self.value = nn.Linear(self.input_size, self.head_dim * self.num_kv_heads, bias=False)
         self.output = nn.Linear(self.head_dim *self. num_heads, self.output_size, bias=False)
 
+        shape = (max_batch_size, max_seq_length, num_kv_heads, head_dim)
+        self.register_buffer("k_cache", torch.zeros(shape), persistent=False)
+        self.register_buffer("v_cache", torch.zeros(shape), persistent=False)
+
     @staticmethod
     def repeat_kv(tensor: torch.Tensor, repeat: int) -> torch.Tensor:
         s = tensor.shape
         return tensor[:, :, None].expand(s[0], s[1], repeat, s[2], s[3]).reshape(s[0], s[1] * repeat, s[2], s[3])
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
         batch = x.size(0)
         length = x.size(1)
         q = self.query(x).view(batch, length, self.num_heads, self.head_dim)
         k = self.key(x).view(batch, length, self.num_kv_heads, self.head_dim)
         v = self.value(x).view(batch, length, self.num_kv_heads, self.head_dim)
 
-        rotated = self.rope_encoder.rotate(q, k, 0)
+        rotated = self.rope_encoder.rotate(q, k, start_pos)
         q, k = rotated.queries, rotated.keys
+
+        if not self.training:
+            self.k_cache[ :batch, start_pos : start_pos + length] = k
+            self.v_cache[ :batch, start_pos : start_pos + length] = v
+            k = self.k_cache[:batch, : start_pos + length]
+            v = self.v_cache[:batch, : start_pos + length]
+
 
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
